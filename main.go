@@ -95,6 +95,9 @@ func getDefaultRekorFlags(trustedRoot *root.TrustedRoot, signingConfig *root.Sig
 	rekorFlags := []string{}
 	for _, log := range trustedRoot.RekorLogs() {
 		service := getRekorService(signingConfig, log.BaseURL)
+		if service == nil {
+			continue
+		}
 		apiVersion := 1
 		if service != nil {
 			apiVersion = int(service.MajorAPIVersion)
