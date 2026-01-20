@@ -36,9 +36,16 @@ type TUFGeneratorConfig struct {
 	ctLogs                map[string]*ServiceSpec
 	rekorLogs             map[string]*ServiceSpec
 	tsaCertAuthorities    []root.TimestampingAuthority
-	oidcProviders         []string
+	oidcProviders         []OIDCProvider
 	baseTempDir           string
 	outputDir             string
+}
+
+// OIDCProvider represents an OIDC identity provider configuration.
+type OIDCProvider struct {
+	URL                 string
+	ValidityPeriodStart time.Time
+	ValidityPeriodEnd   time.Time
 }
 
 type ServiceSpec struct {
@@ -395,6 +402,45 @@ func parseCTLog(spec string) (*ServiceSpec, string, error) {
 	})
 }
 
+// parseOIDCSpec parses an OIDC provider specification.
+// Required: url
+// Optional: start-time, end-time
+func parseOIDCSpec(spec string) (OIDCProvider, error) {
+	kvs, err := parseKVs(spec)
+	if err != nil {
+		return OIDCProvider{}, err
+	}
+
+	requiredKeys := []string{"url"}
+	for _, key := range requiredKeys {
+		if val, ok := kvs[key]; !ok || val == "" {
+			return OIDCProvider{}, fmt.Errorf("missing or empty required key '%s' in oidc spec", key)
+		}
+	}
+
+	var startTime time.Time
+	if st, ok := kvs["start-time"]; ok && st != "" {
+		startTime, err = time.Parse(time.RFC3339, st)
+		if err != nil {
+			return OIDCProvider{}, fmt.Errorf("parsing start-time: %w", err)
+		}
+	}
+
+	var endTime time.Time
+	if et, ok := kvs["end-time"]; ok && et != "" {
+		endTime, err = time.Parse(time.RFC3339, et)
+		if err != nil {
+			return OIDCProvider{}, fmt.Errorf("parsing end-time: %w", err)
+		}
+	}
+
+	return OIDCProvider{
+		URL:                 kvs["url"],
+		ValidityPeriodStart: startTime,
+		ValidityPeriodEnd:   endTime,
+	}, nil
+}
+
 func parseTSASpec(spec string) (root.TimestampingAuthority, error) {
 	kvs, err := parseKVs(spec)
 	if err != nil {
@@ -520,7 +566,7 @@ func getSignatureHashAlgo(pubKey crypto.PublicKey) crypto.Hash {
 
 // NewTUFGeneratorConfig creates a new TUF generator configuration from
 // command-line service specifications.
-func NewTUFGeneratorConfig(rekorConfigs []string, fulcioConfigs []string, ctfeConfigs []string, tsaConfigs []string, baseTempDir string, outputDir string) (*TUFGeneratorConfig, error) {
+func NewTUFGeneratorConfig(rekorConfigs []string, fulcioConfigs []string, ctfeConfigs []string, tsaConfigs []string, oidcConfigs []string, baseTempDir string, outputDir string) (*TUFGeneratorConfig, error) {
 	rekorLogs := make(map[string]*ServiceSpec)
 	for _, rekorConfig := range rekorConfigs {
 		tlog, id, err := parseRekorLog(rekorConfig)
@@ -557,11 +603,21 @@ func NewTUFGeneratorConfig(rekorConfigs []string, fulcioConfigs []string, ctfeCo
 		tsaCAs = append(tsaCAs, tsaCA)
 	}
 
+	oidcProviders := make([]OIDCProvider, 0, len(oidcConfigs))
+	for _, oidcConfig := range oidcConfigs {
+		oidcProvider, err := parseOIDCSpec(oidcConfig)
+		if err != nil {
+			return nil, fmt.Errorf("parsing oidc spec: %w", err)
+		}
+		oidcProviders = append(oidcProviders, oidcProvider)
+	}
+
 	return &TUFGeneratorConfig{
 		fulcioCertAuthorities: fulcioCAs,
 		ctLogs:                ctLogs,
 		rekorLogs:             rekorLogs,
 		tsaCertAuthorities:    tsaCAs,
+		oidcProviders:         oidcProviders,
 		baseTempDir:           baseTempDir,
 		outputDir:             outputDir,
 	}, nil

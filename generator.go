@@ -53,12 +53,14 @@ func fulcioCAToServices(fulcioCAList []root.CertificateAuthority) []root.Service
 	return services
 }
 
-func oidcProviderToServices(oidcProviders []string) []root.Service {
+func oidcProviderToServices(oidcProviders []OIDCProvider) []root.Service {
 	services := make([]root.Service, 0, len(oidcProviders))
 	for _, oidcProvider := range oidcProviders {
 		services = append(services, root.Service{
-			URL:             oidcProvider,
-			MajorAPIVersion: 1,
+			URL:                 oidcProvider.URL,
+			MajorAPIVersion:     1,
+			ValidityPeriodStart: oidcProvider.ValidityPeriodStart,
+			ValidityPeriodEnd:   oidcProvider.ValidityPeriodEnd,
 		})
 	}
 	return services

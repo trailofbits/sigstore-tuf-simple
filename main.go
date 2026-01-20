@@ -134,8 +134,21 @@ func getDefaultRekorFlags(trustedRoot *root.TrustedRoot, signingConfig *root.Sig
 	return rekorFlags
 }
 
-func getDefaultOIDCFlags() []string {
-	return []string{"url=https://oauth2.sigstore.dev/auth"}
+func getDefaultOIDCFlags(signingConfig *root.SigningConfig) []string {
+	oidcFlags := []string{}
+	for _, service := range signingConfig.OIDCProviderURLs() {
+		endTimeStr := ""
+		if !service.ValidityPeriodEnd.IsZero() {
+			endTimeStr = fmt.Sprintf(",end-time=%s", service.ValidityPeriodEnd.Format(time.RFC3339))
+		}
+		oidcFlag := fmt.Sprintf("url=%s,start-time=%s%s",
+			service.URL,
+			service.ValidityPeriodStart.Format(time.RFC3339),
+			endTimeStr,
+		)
+		oidcFlags = append(oidcFlags, oidcFlag)
+	}
+	return oidcFlags
 }
 
 func main() {
@@ -162,7 +175,7 @@ func main() {
 		return nil
 	})
 	var oidcFlags []string
-	flag.Func("oidc", "oidc provider specification, as a comma-separated key-value list.\nRequired keys: url", func(s string) error {
+	flag.Func("oidc", "oidc provider specification, as a comma-separated key-value list.\nRequired keys: url. Optional keys: start-time, end-time.", func(s string) error {
 		oidcFlags = append(oidcFlags, s)
 		return nil
 	})
@@ -204,7 +217,7 @@ func main() {
 		rekorFlags = getDefaultRekorFlags(trustedRoot, signingConfig, baseTempDir)
 	}
 	if len(oidcFlags) == 0 {
-		oidcFlags = getDefaultOIDCFlags()
+		oidcFlags = getDefaultOIDCFlags(signingConfig)
 	}
 
 	fmt.Fprintf(os.Stderr, "Generating TUF repository at %s...\n", *outputDir)
@@ -219,6 +232,7 @@ func main() {
 		fulcioFlags,
 		ctfeFlags,
 		tsaFlags,
+		oidcFlags,
 		baseTempDir,
 		*outputDir,
 	)
