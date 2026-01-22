@@ -160,7 +160,7 @@ func main() {
 		return nil
 	})
 	var ctfeFlags []string
-	flag.Func("ctfe", "ctfe service specification, as a comma-separated key-value list.\nRequired keys: url, public-key (path to PEM-encoded public key), start-time. Optional keys: end-time.", func(s string) error {
+	flag.Func("ctfe", "ctfe service specification, as a comma-separated key-value list.\nRequired keys: url. Optional keys: public-key (path to PEM-encoded public key), start-time, end-time, origin.", func(s string) error {
 		ctfeFlags = append(ctfeFlags, s)
 		return nil
 	})

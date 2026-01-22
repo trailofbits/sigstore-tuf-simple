@@ -86,8 +86,12 @@ func tsaToServices(tsaList []root.TimestampingAuthority) []root.Service {
 func rekorLogToServices(rekorLogs map[string]*ServiceSpec) []root.Service {
 	services := make([]root.Service, 0, len(rekorLogs))
 	for _, rekorLog := range rekorLogs {
+		url := rekorLog.ServiceURL
+		if url == "" {
+			url = rekorLog.BaseURL
+		}
 		services = append(services, root.Service{
-			URL:                 rekorLog.BaseURL,
+			URL:                 url,
 			MajorAPIVersion:     rekorLog.APIVersion,
 			ValidityPeriodStart: rekorLog.ValidityPeriodStart,
 			ValidityPeriodEnd:   rekorLog.ValidityPeriodEnd,

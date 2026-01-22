@@ -51,6 +51,7 @@ type OIDCProvider struct {
 type ServiceSpec struct {
 	root.TransparencyLog
 	APIVersion uint32
+	ServiceURL string // actual URL for signing config (may differ from BaseURL when origin is set)
 }
 
 // parseKVs parses a comma-separated key-value specification string.
@@ -255,6 +256,12 @@ func parseTLog(spec string, getPublicKey getPublicKey) (*ServiceSpec, string, er
 		}
 	}
 
+	// Extract origin: use explicit origin if provided, otherwise derive from URL
+	origin := kvs["url"]
+	if o, ok := kvs["origin"]; ok && o != "" {
+		origin = o
+	}
+
 	var pubKey crypto.PublicKey
 	var idBytes []byte
 	var id string
@@ -315,13 +322,14 @@ func parseTLog(spec string, getPublicKey getPublicKey) (*ServiceSpec, string, er
 	case 2:
 		// For rekor v2 we need to look at the checkpoint key ID
 		// https://github.com/sigstore/rekor-tiles/blob/main/CLIENTS.md#trustedroot-lookup-by-checkpoint-key-id-rather-than-log-id
-		origin, err := getOrigin(kvs["url"])
+		var err error
+		computedOrigin, err := getOrigin(origin)
 		if err != nil {
 			return nil, "", fmt.Errorf("error getting origin from URL %v: %w", kvs["url"], err)
 		}
 
 		var idInt uint32
-		idInt, idBytes, err = note.KeyHash(origin, pubKey)
+		idInt, idBytes, err = note.KeyHash(computedOrigin, pubKey)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get transparency log ID: %w", err)
 		}
@@ -331,7 +339,7 @@ func parseTLog(spec string, getPublicKey getPublicKey) (*ServiceSpec, string, er
 
 	tlog := &ServiceSpec{
 		TransparencyLog: root.TransparencyLog{
-			BaseURL:             kvs["url"],
+			BaseURL:             origin,
 			ID:                  idBytes,
 			HashFunc:            crypto.SHA256,
 			PublicKey:           pubKey,
@@ -340,6 +348,7 @@ func parseTLog(spec string, getPublicKey getPublicKey) (*ServiceSpec, string, er
 			ValidityPeriodEnd:   endTime,
 		},
 		APIVersion: apiVersion,
+		ServiceURL: kvs["url"],
 	}
 	return tlog, id, nil
 }
