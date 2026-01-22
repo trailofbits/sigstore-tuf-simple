@@ -53,6 +53,11 @@ Test with a local Rekor instance while using public Fulcio:
 ```bash
 ./sigstore-tuf-simple -rekor url=http://localhost:3000
 python3 -m http.server 8081 -d tuf-repo
+
+Example for local rekor-v2 deployment:
+```bash
+./sigstore-tuf-simple -base-tuf staging -rekor url=http://localhost:3003,origin=http://rekor-local,api-version=2,public-key=<path-to-rekor-tiles>/rekor-tiles/tests/testdata/pki/ed25519-pub-key.pem
+python3 -m http.server 8081 -d tuf-repo
 ```
 
 ### Advanced Configuration
