@@ -53,6 +53,7 @@ Test with a local Rekor instance while using public Fulcio:
 ```bash
 ./sigstore-tuf-simple -rekor url=http://localhost:3000
 python3 -m http.server 8081 -d tuf-repo
+```
 
 Example for local rekor-v2 deployment:
 ```bash
