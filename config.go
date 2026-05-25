@@ -39,6 +39,9 @@ type TUFGeneratorConfig struct {
 	oidcProviders         []OIDCProvider
 	baseTempDir           string
 	outputDir             string
+	// signingKeyPath, when set, is a PKCS#8 PEM ed25519 key reused across runs so
+	// an existing outputDir can be updated in place instead of regenerated.
+	signingKeyPath string
 }
 
 // OIDCProvider represents an OIDC identity provider configuration.
@@ -575,7 +578,7 @@ func getSignatureHashAlgo(pubKey crypto.PublicKey) crypto.Hash {
 
 // NewTUFGeneratorConfig creates a new TUF generator configuration from
 // command-line service specifications.
-func NewTUFGeneratorConfig(rekorConfigs []string, fulcioConfigs []string, ctfeConfigs []string, tsaConfigs []string, oidcConfigs []string, baseTempDir string, outputDir string) (*TUFGeneratorConfig, error) {
+func NewTUFGeneratorConfig(rekorConfigs []string, fulcioConfigs []string, ctfeConfigs []string, tsaConfigs []string, oidcConfigs []string, baseTempDir string, outputDir string, signingKeyPath string) (*TUFGeneratorConfig, error) {
 	rekorLogs := make(map[string]*ServiceSpec)
 	for _, rekorConfig := range rekorConfigs {
 		tlog, id, err := parseRekorLog(rekorConfig)
@@ -629,5 +632,6 @@ func NewTUFGeneratorConfig(rekorConfigs []string, fulcioConfigs []string, ctfeCo
 		oidcProviders:         oidcProviders,
 		baseTempDir:           baseTempDir,
 		outputDir:             outputDir,
+		signingKeyPath:        signingKeyPath,
 	}, nil
 }

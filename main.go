@@ -180,6 +180,7 @@ func main() {
 		return nil
 	})
 	outputDir := flag.String("output", "tuf-repo", "Path to the output directory")
+	signingKey := flag.String("signing-key", "", "Path to a persistent ed25519 signing key (PKCS#8 PEM).\nIf the file exists it is reused, so re-running against an existing -output publishes an in-place update (bumped metadata versions, same key) that a running TUF client accepts without a restart.\nIf the file does not exist a new key is generated and saved there.\nIf empty, an ephemeral key is generated each run (the repository cannot be updated in place).")
 	flag.Parse()
 
 	tufClient, err := getTufClient(*tufRepo)
@@ -235,6 +236,7 @@ func main() {
 		oidcFlags,
 		baseTempDir,
 		*outputDir,
+		*signingKey,
 	)
 	if err != nil {
 		log.Fatalf("Error creating TUF generator config: %v", err)
