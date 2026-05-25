@@ -83,6 +83,7 @@ python3 -m http.server 8081 -d custom-tuf-repo
 
 - `-base-tuf`: Base TUF repository ('default' for production or 'staging' for staging environment)
 - `-output`: Output directory for the generated TUF repository (default: 'tuf-repo')
+- `-signing-key`: Path to a persistent ed25519 signing key (PKCS#8 PEM). If the file exists it is reused; if it does not exist a new key is generated and saved there. Reusing the key lets you update an existing repository in place (see [Live Updates](#live-updates)). If empty (the default), an ephemeral key is generated each run and the repository cannot be updated in place.
 
 ### Service-Specific Options
 
@@ -158,6 +159,38 @@ python3 -m http.server 8081 -d tuf-repo
     -tsa url=https://my-tsa.example.com,certificate-chain=./my-tsa-certs.pem
 ```
 
+## Live Updates
+
+By default every run generates a fresh repository with new signing keys at
+version 1. That is fine for one-shot setups, but a TUF client that has already
+loaded the repository will reject a regenerated one (the keys no longer match the
+root it pinned, and the versions do not increase).
+
+To publish an update that a *running* client picks up on its next refresh — for
+example to flip a Rekor v2 shard rollover into the signing config without
+restarting the client — pass a persistent `-signing-key` and re-run against the
+same `-output`:
+
+```bash
+# First run: create the repository and persist the signing key.
+./sigstore-tuf-simple -base-tuf staging -signing-key tuf-key.pem -output tuf \
+    -rekor url=http://localhost:8190,api-version=2,public-key=shardA.pub
+python3 -m http.server 8085 -d tuf &
+
+# Point your client at tuf/1.root.json and let it refresh.
+
+# Later: re-run with the SAME key and new flags to publish an in-place update.
+# The targets/snapshot/timestamp versions are bumped and re-signed with the same
+# key; the root is left untouched, so the already-distributed root keeps validating
+# the repository.
+./sigstore-tuf-simple -base-tuf staging -signing-key tuf-key.pem -output tuf \
+    -rekor url=http://localhost:8190,api-version=2,public-key=shardA.pub \
+    -rekor url=http://localhost:8191,api-version=2,public-key=shardB.pub
+```
+
+Keep the key file outside the served `-output` directory so it is not exposed
+over HTTP.
+
 ## Output Structure
 
 The generated TUF repository follows this structure:
@@ -176,6 +209,12 @@ tuf-repo/
     ├── <hash>.trusted_root.json
     └── <hash>.signing_config.v0.2.json
 ```
+
+An in-place update (see [Live Updates](#live-updates)) adds new versioned
+`N.targets.json` / `N.snapshot.json` files and overwrites `timestamp.json`; the
+older metadata versions, along with the content-addressed `targets/` blobs they
+reference, are left in place as consistent-snapshot history, so a client resolving
+an earlier snapshot can still fetch its targets. `1.root.json` is unchanged.
 
 ## Testing
 

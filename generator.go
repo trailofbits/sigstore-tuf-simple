@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -337,13 +338,20 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-func downloadTargets(td string, targets []targetInfo, targetsMeta *metadata.Metadata[metadata.TargetsType]) error {
+// downloadTargets writes each target as a content-addressed <sha256>.<name> blob
+// under td/targets and records it in targetsMeta. When clean is true the targets
+// directory is wiped first (a fresh repository); when false the existing blobs are
+// kept so that the still-published older N.targets.json metadata keeps resolving —
+// changed targets land under new hashes and the old blobs remain as
+// consistent-snapshot history.
+func downloadTargets(td string, targets []targetInfo, targetsMeta *metadata.Metadata[metadata.TargetsType], clean bool) error {
 	targetsDir := filepath.Join(td, "targets")
-	err := os.RemoveAll(targetsDir)
-	if err != nil {
-		return err
+	if clean {
+		if err := os.RemoveAll(targetsDir); err != nil {
+			return err
+		}
 	}
-	err = os.MkdirAll(targetsDir, 0700)
+	err := os.MkdirAll(targetsDir, 0700)
 	if err != nil {
 		return err
 	}
@@ -386,12 +394,8 @@ type tufData struct {
 	targets   *metadata.Metadata[metadata.TargetsType]
 }
 
-func newKey() (*metadata.Key, signature.Signer, error) {
-	pub, private, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	public, err := metadata.KeyFromPublicKey(pub)
+func keyAndSigner(private ed25519.PrivateKey) (*metadata.Key, signature.Signer, error) {
+	public, err := metadata.KeyFromPublicKey(private.Public())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -402,22 +406,76 @@ func newKey() (*metadata.Key, signature.Signer, error) {
 	return public, signer, nil
 }
 
-func newTUF(td string, targetList []targetInfo) (*tufData, error) {
+// loadOrCreateSigningKey returns the ed25519 key used to sign every role.
+//
+// With path set it persists the key as PKCS#8 PEM so later runs reuse it: that
+// is what lets an existing repository be updated in place (an update re-signed
+// with a different key would not validate against the already-published root).
+// loaded reports whether the key came from an existing file, which the caller
+// uses to tell an update apart from a fresh repository sharing the directory.
+// With path empty an ephemeral key is generated and loaded is false.
+func loadOrCreateSigningKey(path string) (key *metadata.Key, signer signature.Signer, loaded bool, err error) {
+	if path != "" {
+		pemBytes, readErr := os.ReadFile(path)
+		switch {
+		case readErr == nil:
+			block, _ := pem.Decode(pemBytes)
+			if block == nil {
+				return nil, nil, false, fmt.Errorf("decoding signing key %s: no PEM block found", path)
+			}
+			parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+			if err != nil {
+				return nil, nil, false, fmt.Errorf("parsing signing key %s: %w", path, err)
+			}
+			private, ok := parsed.(ed25519.PrivateKey)
+			if !ok {
+				return nil, nil, false, fmt.Errorf("signing key %s is %T, want ed25519", path, parsed)
+			}
+			key, signer, err = keyAndSigner(private)
+			return key, signer, true, err
+		case !errors.Is(readErr, os.ErrNotExist):
+			return nil, nil, false, fmt.Errorf("reading signing key %s: %w", path, readErr)
+		}
+	}
+
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if path != "" {
+		if err := saveSigningKey(path, private); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	key, signer, err = keyAndSigner(private)
+	return key, signer, false, err
+}
+
+func saveSigningKey(path string, private ed25519.PrivateKey) error {
+	der, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return fmt.Errorf("marshaling signing key: %w", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(path, pemBytes, 0600); err != nil {
+		return fmt.Errorf("writing signing key %s: %w", path, err)
+	}
+	return nil
+}
+
+func newTUF(td string, targetList []targetInfo, public *metadata.Key, signer signature.Signer) (*tufData, error) {
 	// source: https://github.com/theupdateframework/go-tuf/blob/v2.0.2/examples/repository/basic_repository.go
 	expiration := time.Now().AddDate(0, 0, 1).UTC()
 	targets := metadata.Targets(expiration)
-	err := downloadTargets(td, targetList, targets)
+	err := downloadTargets(td, targetList, targets, true)
 	if err != nil {
 		return nil, err
 	}
 	snapshot := metadata.Snapshot(expiration)
 	timestamp := metadata.Timestamp(expiration)
-	root := metadata.Root(expiration)
-
-	public, signer, err := newKey()
-	if err != nil {
-		return nil, err
-	}
+	// updateTUF never re-issues the root, so give it a long life; otherwise an
+	// in-place update would stop validating once the original 1-day root expired.
+	root := metadata.Root(time.Now().AddDate(1, 0, 0).UTC())
 
 	tuf := &tufData{
 		publicKey: public,
@@ -483,18 +541,141 @@ func newTUF(td string, targetList []targetInfo) (*tufData, error) {
 	return tuf, nil
 }
 
-// Generate creates a complete TUF repository in the configured output directory.
-// This includes generating all metadata files and copying target files.
+// repoVersions holds the current metadata versions of a previously generated
+// repository. root is kept at version 1 for the life of the repository (its keys
+// never change), so only the snapshot-tracked roles are recorded here.
+type repoVersions struct {
+	targets   int64
+	snapshot  int64
+	timestamp int64
+}
+
+// readRepoVersions reads the current versions of a repository previously written
+// to td, following timestamp -> snapshot -> targets. found is false when td does
+// not yet contain a repository.
+func readRepoVersions(td string) (versions repoVersions, found bool, err error) {
+	timestamp, err := metadata.Timestamp().FromFile(filepath.Join(td, "timestamp.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return repoVersions{}, false, nil
+	}
+	if err != nil {
+		return repoVersions{}, false, fmt.Errorf("reading existing timestamp: %w", err)
+	}
+	snapshotVer := timestamp.Signed.Meta["snapshot.json"].Version
+	snapshot, err := metadata.Snapshot().FromFile(filepath.Join(td, fmt.Sprintf("%d.snapshot.json", snapshotVer)))
+	if err != nil {
+		return repoVersions{}, false, fmt.Errorf("reading existing snapshot: %w", err)
+	}
+	return repoVersions{
+		targets:   snapshot.Signed.Meta["targets.json"].Version,
+		snapshot:  snapshotVer,
+		timestamp: timestamp.Signed.Version,
+	}, true, nil
+}
+
+// updateTUF publishes a new version of an existing repository: it re-signs the
+// targets, snapshot and timestamp with the persisted key at incremented
+// versions. The root is left untouched (same key, same delegations) so the
+// already-distributed root keeps validating the repository, which is what lets a
+// running TUF client pick up the change on its next refresh without a restart.
+func updateTUF(td string, targetList []targetInfo, signer signature.Signer, prev repoVersions) error {
+	expiration := time.Now().AddDate(0, 0, 1).UTC()
+
+	targets := metadata.Targets(expiration)
+	targets.Signed.Version = prev.targets + 1
+	// Keep the previous content-addressed blobs in place: the older N.targets.json
+	// metadata stays published, so a client resolving an earlier snapshot must still
+	// be able to fetch the targets it references.
+	if err := downloadTargets(td, targetList, targets, false); err != nil {
+		return err
+	}
+
+	snapshot := metadata.Snapshot(expiration)
+	snapshot.Signed.Version = prev.snapshot + 1
+	snapshot.Signed.Meta["targets.json"] = metadata.MetaFile(targets.Signed.Version)
+
+	timestamp := metadata.Timestamp(expiration)
+	timestamp.Signed.Version = prev.timestamp + 1
+	timestamp.Signed.Meta["snapshot.json"] = metadata.MetaFile(snapshot.Signed.Version)
+
+	for _, m := range []signable{targets, snapshot, timestamp} {
+		if _, err := m.Sign(signer); err != nil {
+			return err
+		}
+	}
+
+	// The root never changes, so it stays at version 1. Verifying the new metadata
+	// against it catches a mismatched -signing-key before anything is written.
+	root, err := metadata.Root().FromFile(filepath.Join(td, "1.root.json"))
+	if err != nil {
+		return fmt.Errorf("reading existing root (regenerate with a fresh -output if it is missing): %w", err)
+	}
+	// updateTUF never re-issues the root, so an expired root cannot be refreshed
+	// here. Publishing against it would only produce metadata every client rejects,
+	// so fail with a clear message instead. (Roots created before the long-lived
+	// root change expire after a day and hit this quickly.)
+	if root.Signed.IsExpired(time.Now()) {
+		return fmt.Errorf("existing root expired on %s; updateTUF cannot re-issue it, regenerate the repository with a fresh -output", root.Signed.Expires.UTC().Format(time.RFC3339))
+	}
+	if err := root.VerifyDelegate("targets", targets); err != nil {
+		return fmt.Errorf("verifying updated targets (wrong -signing-key?): %w", err)
+	}
+	if err := root.VerifyDelegate("snapshot", snapshot); err != nil {
+		return fmt.Errorf("verifying updated snapshot: %w", err)
+	}
+	if err := root.VerifyDelegate("timestamp", timestamp); err != nil {
+		return fmt.Errorf("verifying updated timestamp: %w", err)
+	}
+
+	if err := targets.ToFile(filepath.Join(td, fmt.Sprintf("%d.targets.json", targets.Signed.Version)), false); err != nil {
+		return err
+	}
+	if err := snapshot.ToFile(filepath.Join(td, fmt.Sprintf("%d.snapshot.json", snapshot.Signed.Version)), false); err != nil {
+		return err
+	}
+	return timestamp.ToFile(filepath.Join(td, "timestamp.json"), false)
+}
+
+type signable interface {
+	Sign(signature.Signer) (*metadata.Signature, error)
+}
+
+// Generate writes a complete TUF repository to the configured output directory.
+//
+// When a persistent signing key is configured (see signingKeyPath) and the
+// output directory already holds a repository, the existing metadata is updated
+// in place (versions bumped, root reused) instead of regenerated from scratch.
 func (g *TUFGenerator) Generate() error {
 	tempDir, err := os.MkdirTemp(g.config.baseTempDir, "tuf-repo-*")
 	if err != nil {
-		return nil
+		return err
 	}
 	defer os.RemoveAll(tempDir)
 
 	targets := getTargets(g.config, tempDir)
-	_, err = newTUF(g.config.outputDir, targets)
+
+	public, signer, keyLoaded, err := loadOrCreateSigningKey(g.config.signingKeyPath)
 	if err != nil {
+		return fmt.Errorf("preparing signing key: %w", err)
+	}
+
+	// An update is only possible with the original key. A freshly generated key
+	// (keyLoaded == false) means this is a new repository even if a stale one
+	// happens to share the directory, so fall through to a full regeneration.
+	if keyLoaded {
+		prev, found, err := readRepoVersions(g.config.outputDir)
+		if err != nil {
+			return err
+		}
+		if found {
+			if err := updateTUF(g.config.outputDir, targets, signer, prev); err != nil {
+				return fmt.Errorf("failed to update tuf: %w", err)
+			}
+			return nil
+		}
+	}
+
+	if _, err = newTUF(g.config.outputDir, targets, public, signer); err != nil {
 		return fmt.Errorf("failed to create tuf: %w", err)
 	}
 	return nil
